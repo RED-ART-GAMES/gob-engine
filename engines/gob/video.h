@@ -98,6 +98,8 @@ namespace Gob {
 			PalDesc() : vgaPal(0), unused1(0), unused2(0) {}
 		};
 
+		std::function<void()> afterRetrace;
+
 		bool _doRangeClamp;
 
 		int16 _surfWidth;

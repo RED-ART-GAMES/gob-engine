@@ -234,7 +234,6 @@ namespace Gob {
 	Common::InSaveFile* SlotFileIndexed::openRead(int slot) const {
 		Common::String name = build(slot);
 		if (name.empty()) return nullptr;
-		Common::SaveFileManager* saveMan = g_system->getSavefileManager();
 
 		return g_system
 			->getSavefileManager()

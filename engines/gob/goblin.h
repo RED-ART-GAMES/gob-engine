@@ -207,7 +207,6 @@ namespace Gob {
 		void setMultStates(Gob_Object* gobDesc);
 		int16 nextLayer(Gob_Object* gobDesc);
 		void showBoredom(int16 gobIndex);
-		Common::Point getGoblinPosition(int16 index) const noexcept;
 		void switchGoblin(int16 index);
 		void zeroObjects();
 		void freeAllObjects();
@@ -316,6 +315,8 @@ namespace Gob {
 
 		Goblin_v3(GobEngine* vm);
 		~Goblin_v3() override {}
+
+		static bool isMovementAnimation(const int8_t state);
 
 	protected:
 		bool isMovement(int8 state) override;

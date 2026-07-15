@@ -25,21 +25,81 @@
  *
  */
 
-#ifndef GOB_UTIL_H
-#define GOB_UTIL_H
+#pragma once
 
 #include "common/str.h"
 #include "common/keyboard.h"
 #include "common/events.h"
 
-namespace Common
-{
+#include <chrono>
+#include <cstdint>
+#include <optional>
+
+namespace Common {
 	class SeekableReadStream;
 }
 
 namespace Gob {
-
 	class GobEngine;
+
+	enum struct AnimationType {
+		ProbablyActiveAnimation,
+		UnselectedAnimation,
+		MovementAnimation,
+		SelectedAnimation,
+	};
+
+	enum struct Gob23_GameType {
+		Gob2,
+		Gob3
+	};
+
+	struct GoblinAnimation {
+		int8_t        animationId;
+		AnimationType type;
+
+		GoblinAnimation(const Gob23_GameType gameType, const int8_t animationType);
+
+		static bool isSameType(const std::optional<GoblinAnimation>& a, const GoblinAnimation& b);
+
+		bool isActiveCharacterAnimation() const;
+	};
+
+	struct GoblinAnimationChange {
+		using Clock = std::chrono::steady_clock;
+
+		using TimePoint = Clock::time_point;
+
+		GoblinAnimationChange(std::optional<GoblinAnimation> from, GoblinAnimation to);
+
+		TimePoint                      time;
+		std::optional<GoblinAnimation> from;
+		GoblinAnimation                to;
+	};
+
+	struct GoblinAnimationInfo {
+		std::optional<GoblinAnimationChange>            lastChange;
+		std::optional<GoblinAnimationChange::TimePoint> lastActiveTime;
+		uint8_t                                         characterIndex;
+
+		bool isSelectable(const GobEngine& engine) const;
+
+		void refreshState(
+			const GobEngine&                        engine,
+			const std::vector<GoblinAnimationInfo>& others,
+			const GoblinAnimationChange::TimePoint& now);
+
+		bool refuseTransition(
+			const GobEngine&                           engine,
+			const std::optional<GoblinAnimationChange> previousChange,
+			const std::optional<GoblinAnimation>       newState,
+			const std::vector<GoblinAnimationInfo>&    others) const;
+
+		GoblinAnimationChange::TimePoint lastActiveCharacterSearchTime(const GobEngine& engine) const;
+
+	private:
+		std::optional<GoblinAnimation> readState(const GobEngine& engine);
+	};
 
 #define KEYBUFSIZE 16
 
@@ -110,6 +170,7 @@ namespace Gob {
 		void longDelay(uint16 msecs);
 
 		void forceChangeAspectRatio();
+		void resizeAnimationTrackingList(const uint8_t size);
 
 		void initInput();
 		bool preprocessJoystickButtonEvent(Common::Event& event);
@@ -119,8 +180,9 @@ namespace Gob {
 		int16 checkKey();
 		bool checkKey(int16& key);
 		bool keyPressed();
+		void setRetraceHook();
 
-		void switchGoblin(Common::Event& event);
+		void switchGoblin();
 
 		uint32 getKeyState() const;
 
@@ -138,6 +200,7 @@ namespace Gob {
 		void notifyNewAnim();
 		void waitEndFrame(bool handleInput = true);
 		void setScrollOffset(int16 x = -1, int16 y = -1);
+		void onFingerMotionSdlEvent(const Common::Pointf& mouseWindowPosition);
 
 		static void insertStr(const char* str1, char* str2, int16 pos);
 		static void cutFromStr(char* str, int16 from, int16 cutlen);
@@ -178,8 +241,12 @@ namespace Gob {
 		uint32 _keyState;
 
 		GobEngine* _vm;
+		bool _characterSwichFlagRaised = false;
+		std::vector<GoblinAnimationInfo> _gob23_animationState;
 
 		bool keyBufferEmpty();
+		void refreshAnimationInfo();
+		std::optional<Common::Rectangle> findCharacterSwitchingClickZone();
 		void addKeyToBuffer(const Common::KeyState& key);
 		bool getKeyFromBuffer(Common::KeyState& key);
 		int16 translateKey(const Common::KeyState& key);
@@ -191,5 +258,3 @@ namespace Gob {
 	};
 
 } // End of namespace Gob
-
-#endif // GOB_UTIL_H

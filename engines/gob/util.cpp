@@ -42,6 +42,9 @@
 #include "gob/sound/sound.h"
 
 namespace Gob {
+	namespace {
+		Common::Rectangle getCharacterRectangle(const GobEngine& engine, const uint8_t characterIndex);
+	}
 
 	Util::Util(GobEngine* vm) : _vm(vm) {
 		_mouseButtons = kMouseButtonsNone;
@@ -53,6 +56,38 @@ namespace Gob {
 		_startFrameTime = 0;
 
 		_keyState = 0;
+	}
+
+	void Util::setRetraceHook() {
+		const Gob::GameType gameType = _vm->getGameType();
+
+		const bool isGob2 = gameType == Gob::GameType::kGameTypeGob2;
+
+		const bool refreshAnimationEachFrame = isGob2 || gameType == Gob::GameType::kGameTypeGob3;
+
+		if (refreshAnimationEachFrame) {
+			const uint8_t maxGoblinCount = isGob2 ? 3 : 2;
+
+			for (uint8_t i = 0; i < maxGoblinCount; i++) {
+				GoblinAnimationInfo info;
+
+				info.characterIndex = i;
+
+				_gob23_animationState.emplace_back(std::move(info));
+			}
+		}
+
+		_vm->_video->afterRetrace = [this, refreshAnimationEachFrame]() {
+			if (refreshAnimationEachFrame) {
+				refreshAnimationInfo();
+			}
+
+			if (_characterSwichFlagRaised) {
+				this->switchGoblin();
+
+				_characterSwichFlagRaised = false;
+			}
+		};
 	}
 
 	uint32 Util::getTimeKey() {
@@ -113,129 +148,444 @@ namespace Gob {
 		_vm->_video->dirtyRectsAll(); // Force the vm to redraw everything!
 	}
 
-	/// <summary>
-	/// Switch to the next goblin if all conditions are met:
-	/// 1. the next goblin is not busy,
-	/// 2. the animation of the next goblin is set,
-	/// 3. the index points to a valid array index.
-	/// The switch is done left clicking on an object (inventory or goblin directly), and
-	/// the mouse release event is only transmitted if the left click has been performaed.
-	/// So, if the requirements are not met the left click event is not transmitted, and
-	/// the mouse release event should be dropped.
-	/// </summary>
-	/// <param name="event">The full button event, to know if the user pressed or released the button</param>
-	void Util::switchGoblin(Common::Event& event) {
-		/// <summary>
-		/// Only used in Gob2 and Gob3, in order to know which goblin is used
-		/// </summary>
-		static int _currentGoblin = 0;
-		static int _nbGoblinsPerGame[3] = { 3, 3, 2 };
-		/// <summary>
-		/// The last position of the cursor after clicking on object / goblin, to switch
-		/// to another character
-		/// </summary>
-		static Common::Point _lastKnownPosition = Common::Point(0, 0);
-		/// <summary>
-		/// Save if a left click has been "down" when firing the "up" event
-		/// </summary>
-		/// <param name="event"></param>
-		static bool _hasClicked = false;
+	void Util::resizeAnimationTrackingList(const uint8_t size) {
+		const size_t currentSize = _gob23_animationState.size();
 
-		Common::Event clickEvent;
+		if (size > currentSize) {
+			for (uint8_t i = currentSize; i < size; i++) {
+				GoblinAnimationInfo info;
 
-		// If the event is only the "up" button, then go back to initial position
-		// and launch a "mouse release" event
-		// This is common for Gob1, Gob2 and Gob3
-		if (event.type == Common::EventType::EVENT_JOYBUTTON_UP) {
-			if (!_hasClicked) return; // If the up does not follow a "down" event, then return without notifying the system
-			clickEvent.type = Common::EventType::EVENT_LBUTTONUP;
-			clickEvent.mouse = _lastKnownPosition;
-			_lastKnownPosition = Common::Point(0, 0);
-			_hasClicked = false;
-			g_system->getEventManager()->notifyEvent(clickEvent);
+				info.characterIndex = i;
+
+				_gob23_animationState.emplace_back(std::move(info));
+			}
+		} else if (size < currentSize) {
+			for (uint8_t i = 0; i < currentSize - size; i++) {
+				_gob23_animationState.pop_back();
+			}
+		}
+	}
+
+	std::optional<GoblinAnimation> GoblinAnimationInfo::readState(const GobEngine& engine) {
+		const Mult::Mult_AnimData& animationData  = *engine._mult->_objects[characterIndex].pAnimData;
+		const int8_t               animationState = animationData.state;
+
+		/*
+		* Edge case: the prince buffoon!
+		*
+		* The prince is a third character that is not playable everywhere (only one level). To check if we can play it,
+		* we must look at its state - the object will be in the array of objects whether it exists or not.
+		*
+		* Also, we mustn't use the 'isBusy' flag! It's only valid when the goblin is not **selected** (!!!)
+		* and should be ignored when the goblin cannot be played. This means that switching characters at the end
+		* of the Gob18 script will move characters, and not "disable" checks... See issue #23206.
+		*/
+		if (characterIndex == 2 && (engine.isCurrentTot("GOB21.TOT") || animationData.state < 0 || animationData.nextState < 0 || animationData.isPaused)) {
+			return std::nullopt;
+		}
+
+		if (animationData.isStatic) {
+			return std::nullopt;
+		}
+
+		return GoblinAnimation(
+			engine.getGameType() == GameType::kGameTypeGob2 ? Gob23_GameType::Gob2 : Gob23_GameType::Gob3,
+			animationState);
+	}
+
+	GoblinAnimation::GoblinAnimation(const Gob23_GameType gameType, const int8_t animationId)
+		: animationId(animationId)
+	{
+		type = AnimationType::ProbablyActiveAnimation;
+
+		if (animationId == 8 || animationId == 9) {
+			type = AnimationType::SelectedAnimation;
+		} else if (animationId == 28) {
+			type = AnimationType::UnselectedAnimation; // Really an idle animation.
+		} else if (gameType == Gob23_GameType::Gob2) {
+			if (animationId < 8 || animationId == 12 || (animationId >= 15 && animationId <= 18) || animationId == 20) {
+				type = AnimationType::MovementAnimation;
+			} else if (animationId >= 24 && animationId <= 29) {
+				// 24 to 27: Boredom animations.
+				// 28:       Unselected character's idle animation.
+				// 29:       Not sure, but it seems to be what plays after a boredom animation.
+				type = AnimationType::UnselectedAnimation;
+			}
+		} else if (gameType == Gob23_GameType::Gob3) {
+			if (animationId >= 44 && animationId <= 47) {
+				// 44 to 47: Boredom animations, as found in scripts.
+				// 28:       Unselected character's idle animation.
+				type = AnimationType::UnselectedAnimation;
+			} else if (Goblin_v3::isMovementAnimation(animationId) || (animationId >= 15 && animationId <= 18)) {
+				// Goblin_v3::isMovementAnimation isn't 100% accurate.
+				type = AnimationType::MovementAnimation;
+			}
+		}
+	}
+
+	bool GoblinAnimation::isActiveCharacterAnimation() const {
+		return type != AnimationType::UnselectedAnimation;
+	}
+
+	bool GoblinAnimation::isSameType(const std::optional<GoblinAnimation>& a, const GoblinAnimation& b) {
+		return a.has_value() && a->type == b.type;
+	}
+
+	GoblinAnimationChange::GoblinAnimationChange(std::optional<GoblinAnimation> from, GoblinAnimation to)
+		: time(Clock::now())
+		, from(from)
+		, to(to)
+	{}
+
+	bool GoblinAnimationInfo::isSelectable(const GobEngine& engine) const {
+		// `animType` has been observed to be "1" when the character is playing animations involving multiple characters. Ie. in Gob2's mushroom level, when Fingus talks to the buffoon.
+		return lastChange.has_value() && engine._mult->_objects[characterIndex].pAnimData->animType != 1 && getCharacterRectangle(engine, characterIndex).isValidRect();
+	}
+
+	bool GoblinAnimationInfo::refuseTransition(
+		const GobEngine&                           engine,
+		const std::optional<GoblinAnimationChange> previousChange,
+		const std::optional<GoblinAnimation>       newState,
+		const std::vector<GoblinAnimationInfo>&    others) const
+	{
+		if (!previousChange.has_value()) {
+			return false;
+		}
+
+		if (!newState.has_value()) {
+			return false;
+		}
+
+		if (GoblinAnimation::isSameType(previousChange->to, *newState)) {
+			return true;
+		}
+
+		{
+			const GoblinAnimation& from = previousChange->to;
+			const GoblinAnimation& to   = *newState;
+
+			const bool isAfterUserCausedAnimation = (
+				(from.type == AnimationType::ProbablyActiveAnimation && to.type == AnimationType::SelectedAnimation)
+				|| (
+					from.type == AnimationType::MovementAnimation
+					&& (to.type == AnimationType::SelectedAnimation || to.type == AnimationType::ProbablyActiveAnimation)));
+
+			if (!isAfterUserCausedAnimation) {
+				return false;
+			}
+		}
+
+		/*
+		* If any other character has made a transition to an active animation after the buffoon's
+		* last active transition, this is the animation bug we want to guard against. The buffoon
+		* is not actually selected, despite it playing the "selected idle" animation.
+		*/
+		return std::any_of(others.cbegin(), others.cend(), [&previousChange] (const GoblinAnimationInfo& info) {
+			return info.lastChange.has_value() && info.lastChange->time > previousChange->time;
+		});
+	}
+
+	void GoblinAnimationInfo::refreshState(
+		const GobEngine&                        engine,
+		const std::vector<GoblinAnimationInfo>& others,
+		const GoblinAnimationChange::TimePoint& now
+	) {
+		if (engine._mult->_objects == nullptr) {
+			lastChange.reset();
+
 			return;
 		}
 
-		// Prepare for left clicking (down)
-		clickEvent.type = Common::EventType::EVENT_LBUTTONDOWN;
-		int16 x = 0; int16 y = 0;
-		_vm->_util->getMouseState(&x, &y, NULL);
-		// Save the current position, to go back when "up" left click event has been fired
-		_lastKnownPosition = Common::Point(x, y);
+		const std::optional<GoblinAnimation> newState = readState(engine);
 
-		if (Gob::GameType::kGameTypeGob1 == _vm->getGameType()) {
-			// The switch for Gob1 is trivial: there is a medaillon at position 167,185 **in game**
-			// and you can click on it to switch to another gob
-			// No more than that!
-			_hasClicked = true; // Always true for Gob1
-			constexpr Common::Point medaillonPositionGobliins1 = Common::Point(167, 185);
-			clickEvent.mouse = medaillonPositionGobliins1;
+		if (!newState.has_value()) {
+			lastChange.reset();
+
+			return;
 		}
-		else if (Gob::GameType::kGameTypeGob2 == _vm->getGameType()) {
 
-			// This can happen if the player clicks on switch the gob during level loading (or cinematic)
-			if (NULL == _vm->_mult->_objects) {
-				// In this case, do not simulate the click!
-				_hasClicked = false;
-				_lastKnownPosition = Common::Point(0, 0);
-				return;
+		std::optional<GoblinAnimation> previousState = lastChange.has_value() ? std::optional<GoblinAnimation>(lastChange->to) : std::nullopt;
+
+		const bool animationChanged = !previousState.has_value() || newState->animationId != previousState->animationId;
+
+		if (!animationChanged || refuseTransition(engine, lastChange, *newState, others)) {
+			if (newState.has_value() && lastChange.has_value()) {
+				lastChange->to.animationId = newState->animationId;
 			}
 
-			// First, we have to find the available / playable characters
-			// Once we have this, we can switch to another character clicking on it
-			// There is no trap with scrolling here!
-			int newGoblin = (++_currentGoblin) % _nbGoblinsPerGame[1];
+			return;
+		}
 
-			// Exception case: the prince buffoon !
-			// The prince is a third character that is not playable everywhere (only one level)
-			// The way to check we can play it is to take a look at its state (because the object will exists in
-			// the array of objects in any case)
-			if (newGoblin == 2) {
-				Mult::Mult_Object* princeObj = &_vm->_mult->_objects[newGoblin];
-				Mult::Mult_AnimData* princeAnim = princeObj->pAnimData;
-				// Disable the Prince Buffoon character for the entire Gob21 script
-				if (_vm->isCurrentTot("GOB21.TOT")) { newGoblin = 0; }
-				// The default behaviour
-				else {
-					// DO NOT CHECK the 'isBusy' flag !
-					// isBusy is used when the goblin is not **selected** (!!!) and does not have anything to do when the goblin canno't be played
-					// This means that switching characters at the end of Gob18 script will move characters, and not "disable" the checks...
-					// See issue #23206
-					if ((princeAnim->state <= 0) || (princeAnim->nextState <= 0) || (princeAnim->isPaused != 0)) { newGoblin = 0; }
+		if (newState->isActiveCharacterAnimation()) {
+			lastActiveTime = now;
+		}
+
+		lastChange.emplace(previousState, *newState);
+	}
+
+	// We need to have criteria to search for the last active character. A non-selectable character is not a candidate.
+	GoblinAnimationChange::TimePoint GoblinAnimationInfo::lastActiveCharacterSearchTime(const GobEngine& engine) const {
+		constexpr GoblinAnimationChange::TimePoint zero { std::chrono::milliseconds(0) };
+		constexpr GoblinAnimationChange::TimePoint one  { std::chrono::milliseconds(1) };
+
+		return isSelectable(engine) ? lastActiveTime.value_or(one) : zero;
+	}
+
+	void Util::refreshAnimationInfo() {
+		if (_vm->_mult->_objects == nullptr) {
+			for (GoblinAnimationInfo& info : _gob23_animationState) {
+				info.lastChange.reset();
+			}
+
+			return;
+		}
+
+		const GoblinAnimationChange::TimePoint now = GoblinAnimationChange::Clock::now();
+
+		for (GoblinAnimationInfo& info : _gob23_animationState) {
+			info.refreshState(*_vm, _gob23_animationState, now);
+		}
+	}
+
+	namespace {
+		static std::optional<Common::Rectangle> findRegionInRemainingArea(
+			const Gob::GobEngine&    engine,
+			const Common::Rectangle& acceptableRegion,
+			const Common::Rectangle* excludedZones,
+			size_t                   exclusionZoneCount
+		) {
+			// We received a bad rectangle. No acceptable solution will be found here.
+			if (!acceptableRegion.isValidRect()) {
+				return std::nullopt;
+			}
+
+			// There is no exclusion left to process, we can just use the top left corner of the acceptable range to perform our click.
+			if (exclusionZoneCount == 0) {
+				return acceptableRegion;
+			}
+
+			const Common::Rectangle& exclusion = *excludedZones;
+
+			const Common::Rectangle overlap = acceptableRegion.clip(exclusion);
+
+			// This sub-rectangle has no overlap - it's a valid candidate, let's check it against other exclusion zones.
+			if (!overlap.isValidRect()) {
+				return findRegionInRemainingArea(engine, acceptableRegion, excludedZones + 1, exclusionZoneCount - 1);
+			}
+
+#ifdef DEBUG_SWITCHGOB
+			g_system->getGraphicsManager()->addObjectCheat(5, engine._game->_curTotFile, overlap);
+#endif
+
+			// Now, let's find an acceptable region in the zones that don't overlap.
+
+			// Top.
+			if (overlap.top > acceptableRegion.top) {
+				if (auto zone = findRegionInRemainingArea(engine, { acceptableRegion.left, acceptableRegion.top, acceptableRegion.right, static_cast<int16_t>(overlap.top - 1) }, excludedZones + 1, exclusionZoneCount - 1)) {
+					return zone;
 				}
 			}
 
-			Common::Point goblinPosition = _vm->_goblin->getGoblinPosition(newGoblin);
-			if (goblinPosition.x <= 0 && goblinPosition.y <= 0) {
-				_hasClicked = false;
-				_lastKnownPosition = Common::Point(0, 0);
-				return; // Do not simulate the click!
+			// Bottom.
+			if (overlap.bottom < acceptableRegion.bottom) {
+				if (auto zone = findRegionInRemainingArea(engine, { acceptableRegion.left, static_cast<int16_t>(overlap.bottom + 1), acceptableRegion.right, acceptableRegion.bottom }, excludedZones + 1, exclusionZoneCount - 1)) {
+					return zone;
+				}
 			}
-			_hasClicked = true;
-			_currentGoblin = newGoblin;
-			clickEvent.mouse = goblinPosition;
-		}
-		else if (Gob::GameType::kGameTypeGob3 == _vm->getGameType()) {
-			// First, we have to find the available / playable characters
-			// Once we have this, we can switch to another character clicking on it
-			// Be careful because there can a trap with scrolling here!
-			int newGoblin = (++_currentGoblin) % _nbGoblinsPerGame[2];
-			Common::Point goblinPosition = _vm->_goblin->getGoblinPosition(newGoblin);
-			// Remove the scrolling position horizontally, because they will be added again 
-			// when computing in the raw map ("map world", not "screen world")
-			goblinPosition.x -= _vm->_video->_scrollOffsetX;
-			if (goblinPosition.x <= 0 && goblinPosition.y <= 0) {
-				_hasClicked = false;
-				_lastKnownPosition = Common::Point(0, 0);
-				return; // Do not simulate the click!
+
+			// Left.
+			if (overlap.left > acceptableRegion.left) {
+				if (auto zone = findRegionInRemainingArea(engine, { acceptableRegion.left, acceptableRegion.top, static_cast<int16_t>(overlap.left - 1), acceptableRegion.bottom, }, excludedZones + 1, exclusionZoneCount - 1)) {
+					return zone;
+				}
 			}
-			_hasClicked = true;
-			_currentGoblin = newGoblin;
-			clickEvent.mouse = goblinPosition;
+
+			// Right.
+			if (overlap.right < acceptableRegion.right) {
+				if (auto zone = findRegionInRemainingArea(engine, { static_cast<int16_t>(overlap.right + 1), acceptableRegion.top, acceptableRegion.right, acceptableRegion.bottom }, excludedZones + 1, exclusionZoneCount - 1)) {
+					return zone;
+				}
+			}
+
+			return std::nullopt;
 		}
 
-		// Notify the system of the left click
-		g_system->getEventManager()->notifyEvent(clickEvent);
+		Common::Rectangle getCharacterRectangle(const GobEngine& engine, const uint8_t characterIndex) {
+			assert(characterIndex <= 2);
+
+			if (engine._mult->_objects == nullptr) {
+				return { 0, 0, -1, -1 };
+			}
+
+			const bool               isGobBusy = characterIndex == 0 ? engine._goblin->_gob1Busy : engine._goblin->_gob2Busy;
+			const Mult::Mult_Object& object    = engine._mult->_objects[characterIndex];
+
+			if (isGobBusy || (object.newLeft == 0 && object.newTop == 0)) {
+				return { 0, 0, -1, -1 };
+			}
+
+			const Common::Rectangle spriteInfo(object.newLeft, object.newTop, object.newRight, object.newBottom);
+
+			/*
+			* Do not click on the bottom bar or on the menu at the top.
+			* We could miss clicks when the character is fully hidden behind
+			* the menu bar, but that's probably fine.
+			*/
+			return spriteInfo.clip(Common::Rectangle(0, 8 + engine._video->_scrollOffsetY, std::numeric_limits<int16_t>::max(), 170 + engine._video->_scrollOffsetY));
+		}
+
+		std::optional<Common::Rectangle> findExclusiveRegion(
+			const GobEngine&             engine,
+			const uint8_t                selectableGoblinCount,
+			const uint8_t                candidateIndex,
+			const std::array<uint8_t, 3> selectableGoblinIndices
+		) {
+			std::array<Common::Rectangle, 2> exclusionZones;
+			GraphicsManager&                 graphicsManager    = *g_system->getGraphicsManager();
+			const Common::Rectangle          candidateRectangle = getCharacterRectangle(engine, selectableGoblinIndices[candidateIndex]);
+
+			exclusionZones.fill({ 0, 0, -1, -1 });
+
+#ifdef DEBUG_SWITCHGOB
+			graphicsManager.clearObjectCheatsList();
+
+			graphicsManager.addObjectCheat(selectableGoblinIndices[candidateIndex], engine._game->_curTotFile, candidateRectangle);
+#endif
+
+			for (uint8_t i = 0, inserted = 0; i < selectableGoblinCount; i++) {
+				if (candidateIndex == i) {
+					continue;
+				}
+
+				exclusionZones[inserted] = getCharacterRectangle(engine, selectableGoblinIndices[i]);
+
+#ifdef DEBUG_SWITCHGOB
+				graphicsManager.addObjectCheat(selectableGoblinIndices[i], engine._game->_curTotFile, exclusionZones[inserted]);
+#endif
+
+				inserted++;
+			}
+
+			return findRegionInRemainingArea(engine, candidateRectangle, exclusionZones.data(), selectableGoblinCount - 1);
+		}
+	}
+
+	std::optional<Common::Rectangle> Util::findCharacterSwitchingClickZone() {
+		if (_gob23_animationState.size() == 0) {
+			return std::nullopt;
+		}
+
+		const auto lastActiveCharacter = std::max_element(
+			_gob23_animationState.cbegin(),
+			_gob23_animationState.cend(), [this] (const GoblinAnimationInfo& a, const GoblinAnimationInfo& b) {
+				return a.lastActiveCharacterSearchTime(*_vm) < b.lastActiveCharacterSearchTime(*_vm);
+			});
+
+		if (!lastActiveCharacter->isSelectable(*_vm)) {
+			return std::nullopt;
+		}
+
+		std::array<uint8_t, 3> selectableCharacterIndices;
+		uint8_t                selectableCharacterCount   = 0;
+		uint8_t                selectedCharacterIndex;
+
+		for (uint8_t i = 0; i < _gob23_animationState.size() - 1; i++) {
+			// We don't want to select the current character.
+			const uint8_t index = (lastActiveCharacter->characterIndex + 1 + i) % _gob23_animationState.size();
+
+			const GoblinAnimationInfo& info = _gob23_animationState[index];
+
+			if (info.isSelectable(*_vm)) {
+				selectableCharacterIndices[selectableCharacterCount++] = info.characterIndex;
+			}
+		}
+
+		selectableCharacterIndices[selectableCharacterCount++] = lastActiveCharacter->characterIndex;
+
+		for (uint8_t i = 0; i < selectableCharacterCount; i++) {
+			const std::optional<Common::Rectangle> exclusiveRegion = findExclusiveRegion(*_vm, selectableCharacterCount, i, selectableCharacterIndices);
+
+			if (!exclusiveRegion.has_value()) {
+				continue;
+			}
+
+			const uint8_t characterIndex = selectableCharacterIndices[i];
+
+			/*
+			* Edge case: in Gob2, the character may stop reacting to clicks when everybody moves and you keep switching characters.
+			* When switching to the buffon, don't try to use animation state to determine which character was last active. We'll
+			* set the last active animation time to now.
+			*
+			* This might be useful for other characters, but they seem to behave a bit better, so we might not need to apply this
+			* to all characters.
+			*
+			* EDIT: Disregard the above. This is also useful for other characters. We may click characters when they're playing
+			* an active animation (picking up stuff, dropping it, etc.).
+			*/
+			_gob23_animationState[characterIndex].lastActiveTime = GoblinAnimationChange::Clock::now();
+
+			// Not sure the check is necessary, but we don't have the luxury of time to find out, and it should not matter.
+			if (_gob23_animationState[characterIndex].lastChange.has_value()) {
+				_gob23_animationState[characterIndex].lastChange->time = *_gob23_animationState[characterIndex].lastActiveTime;
+			}
+
+			return exclusiveRegion;
+		}
+
+		return std::nullopt;
+	}
+
+	void Util::switchGoblin() {
+		std::optional<Common::Rectangle> exclusiveRegion;
+
+		if (Gob::GameType::kGameTypeGob1 == _vm->getGameType()) {
+			// There is a medallion you can just click to change characters.
+			exclusiveRegion = Common::Rectangle { 167, 185, 167, 185 };
+		} else if (Gob::GameType::kGameTypeGob2 == _vm->getGameType()) {
+			// This can happen if the player tries to change characters while in a cutscene or on the loading screen.
+			if (_vm->_mult->_objects == nullptr) {
+				return;
+			}
+
+			// We don't want to trigger accidental click on menu items.
+			if (_vm->isCurrentTot("menu.tot")) {
+				return;
+			}
+
+			exclusiveRegion = findCharacterSwitchingClickZone();
+		} else if (Gob::GameType::kGameTypeGob3 == _vm->getGameType()) {
+			exclusiveRegion = findCharacterSwitchingClickZone();
+		}
+
+		if (!exclusiveRegion.has_value()) {
+			return;
+		}
+
+		Common::Event switchEvent;
+
+		switchEvent.type = Common::EventType::EVENT_CHARACTERSWITCH;
+
+		// We need to click the center. The top left corner doesn't always work. One example: Blount on the first level of Gob3.
+		switchEvent.characterSwitch.target = *exclusiveRegion->lerp(0.5f);
+
+		switchEvent.characterSwitch.origin = g_system->getEventManager()->getMousePos();
+
+		// I don't know what that is :/
+		switchEvent.characterSwitch.origin.x -= _vm->_video->_screenDeltaX;
+		switchEvent.characterSwitch.origin.y -= _vm->_video->_screenDeltaY;
+
+		// The point to click was detected in virtual space. Change that to window space.
+		switchEvent.characterSwitch.target.x -= _vm->_video->_scrollOffsetX;
+		switchEvent.characterSwitch.target.y -= _vm->_video->_scrollOffsetY;
+
+#ifdef DEBUG_SWITCHGOB
+		g_system
+		->getGraphicsManager()
+		->addObjectCheat(9, "ozef", Common::Rectangle(switchEvent.mouse.x - 2, switchEvent.mouse.y - 2, switchEvent.mouse.x + 2, switchEvent.mouse.y + 2));
+#endif
+
+		// Notify the system of the left click.
+		g_system->getEventManager()->notifyEvent(switchEvent);
 	}
 
 	bool Util::preprocessJoystickButtonEvent(Common::Event& event) {
@@ -297,7 +647,7 @@ namespace Gob {
 		}
 		break;
 		case Common::JoystickButton::JOYSTICK_BUTTON_LEFT_SHOULDER: // Display hints (hotspots / game objects)
-			switchGoblin(event);
+			_characterSwichFlagRaised |= event.type == Common::EventType::EVENT_JOYBUTTON_DOWN;
 			break;
 		case Common::JoystickButton::JOYSTICK_BUTTON_BACK:
 		case Common::JoystickButton::JOYSTICK_BUTTON_START:
@@ -318,17 +668,24 @@ namespace Gob {
 				// Warp the mouse cursor to the top left corner of the screen.
 				SDL_Event event;
 
+				const Common::Pointf normalized = graphicsManager->convertVirtualToNormalized(30, 0);
+
 				event.tfinger.touchId   = SDL_TOUCH_MOUSEID;
 				event.type              = SDL_FINGERMOTION;
 				event.tfinger.type      = SDL_FINGERMOTION;
-				event.tfinger.x         = 40.f / 320.f; // Range is between 0 and 1, and the game screen size is 320. We want to go to the 40th pixels out of those 320.
-				event.tfinger.y         = 0; // Looks bad, but it's gotta be 0 in order to trigger the menu.
+				event.tfinger.x         = normalized.x;
+				event.tfinger.y         = normalized.y; // 0 looks bad, but it's gotta be 0 in order to trigger the menu.
 				event.tfinger.fingerId  = 0; // First finger.
 				event.tfinger.dx        = 0; // Unused.
 				event.tfinger.dy        = 0; // Unused.
 				event.tfinger.pressure  = 1; // Unused.
 				event.tfinger.timestamp = 0; // Unused.
 				event.tfinger.windowID  = 0; // Unused.
+
+				if (_vm->_video->_scrollOffsetY != 0) {
+					_vm->_draw->_scrollOffsetY = 0;
+					_vm->_video->dirtyRectsAll();
+				}
 
 				SDL_PushEvent(&event);
 			} else if (true) {
@@ -789,6 +1146,15 @@ namespace Gob {
 		} while (toWait > 0);
 
 		_startFrameTime = getTimeKey();
+	}
+
+	void Util::onFingerMotionSdlEvent(const Common::Pointf& normalizedPosition) {
+		// The SDL is not able to give us an absolute 0 for finger motions.
+		if (normalizedPosition.y < 0.08 && _vm->_video->_scrollOffsetY > 0) {
+			_vm->_draw->_scrollOffsetY = std::max(0, _vm->_draw->_scrollOffsetY - 2);
+
+			_vm->_video->dirtyRectsAll();
+		}
 	}
 
 	void Util::setScrollOffset(int16 x, int16 y) {

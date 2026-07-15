@@ -34,7 +34,7 @@ namespace Gob {
 	Goblin_v3::Goblin_v3(GobEngine* vm) : Goblin_v2(vm) {
 	}
 
-	bool Goblin_v3::isMovement(int8 state) {
+	bool Goblin_v3::isMovementAnimation(int8 state) {
 		if ((state >= 0) && (state < 8))
 			return true;
 		if ((state >= 40) && (state < 44))
@@ -45,6 +45,10 @@ namespace Gob {
 			return true;
 
 		return false;
+	}
+
+	bool Goblin_v3::isMovement(int8_t state) {
+		return isMovementAnimation(state);
 	}
 
 	void Goblin_v3::advMovement(Mult::Mult_Object* obj, int8 state) {

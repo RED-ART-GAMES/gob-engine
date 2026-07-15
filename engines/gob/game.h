@@ -191,7 +191,7 @@ namespace Gob {
 		Gob::Levels::Level _highestReachedLevel = Gob::Levels::UNKNOWN;
 		// Gobliiins only
 		bool shouldFirePasswordInputs = false;   // Only for Gobliiins (1) -> type automatically the password
-		bool startupCheck = true;                // Check to reload the game at the first level
+		bool _gob1_simulateSaveLoad = true;       // There's no save in Gob1, we just reload the last played level.
 		// Gobliins 2 + Goblins 3
 		bool firstStepForAutoSave = false;       // Only for Gobliins 2 & Goblins 3 -> does not list the slots of the game **only when saving**
 		bool secondStepForAutoSave = false;      // Only for Gobliins 2 & Goblins 3 -> automatically accept the message **when saving**

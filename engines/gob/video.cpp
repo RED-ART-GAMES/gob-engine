@@ -302,6 +302,11 @@ namespace Gob {
 
 	void Video::waitRetrace(bool mouse) {
 		retrace(mouse);
+
+		if (afterRetrace) {
+			afterRetrace();
+		}
+
 		_vm->_util->delay(1);
 	}
 

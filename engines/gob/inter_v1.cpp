@@ -306,14 +306,6 @@ void Inter_v1::setupOpcodesDraw() {
 		// Skip **only** the playMult function if and only if the INTRO.TOT script is played.
 		bool isGob1GlobalIntro = _vm->getGameType() == kGameTypeGob1 && _vm->isCurrentTot("intro.tot");
 
-		if (isGob1GlobalIntro) {
-			if (!_vm->_game->startupCheck && _vm->_game->_highestReachedLevel == Gob::Levels::Level::TWENTYTHREE) {
-				//GOB1: we are back from Level TWENTYTHREE to LEVELONE
-				//we must reinit skipIntro to false in order to see the intro properly
-				_vm->_game->skipIntro = false;
-			}
-		}
-
 		// NOTE: The EGA version of Gobliiins has an MDY tune.
 		//       While the original doesn't play it, we do.
 		bool isGob1EGAIntro = isGob1GlobalIntro &&
@@ -1732,7 +1724,6 @@ void Inter_v1::setupOpcodesDraw() {
 
 			if (_vm->totRequiresMayoHack(_, dropOffset) && pos == dropOffset) {
 				const bool winkleIsDroppingMayo = _vm->_mult->_renderObjs[1]->pAnimData->layer == 13;
-				const bool fingusIsDroppingMayo = _vm->_mult->_renderObjs[0]->pAnimData->layer == 13;
 
 				if (boolRes && !winkleIsDroppingMayo) {
 					// Discard any false positives. Winkle's walk/idle animations should not make the condition true.
@@ -1973,48 +1964,91 @@ void Inter_v1::setupOpcodesDraw() {
 
 			// Append ".tot" if needed
 			if (!_vm->_game->_totToLoad.hasSuffix(".tot")) _vm->_game->_totToLoad += ".tot";
-			// HACK to save data for Gob1 only
-			// 'inter.tot' is a transition room (for Gob1 at least)
-			if (_vm->getGameType() == Gob::kGameTypeGob1 && _vm->isCurrentTot("inter.tot")) {
-				// if the game tries to load the first level, then we should check that we can't load the last played one (startup check?)
-				if (_vm->_game->startupCheck && _vm->_game->_totToLoad.matchString(Gob::Levels::Gob1::MAPPED_LEVEL_NAMES.find(Gob::Levels::Level::ONE)->second)) {
-					// Force to load last level played, if it exists
-					_vm->_game->_totToLoad = Gob::Levels::Gob1::MAPPED_LEVEL_NAMES.find(_vm->_game->_highestReachedLevel)->second;
 
+			if (_vm->getGameType() == Gob::kGameTypeGob1) {
+				const Gob::Levels::Level          requestedLevel      = Gob::Levels::Gob1::getLevelIdFromLevelName(_vm->_game->_totToLoad);
+				bool                              shouldQuit          = false;
+				std::optional<Gob::Levels::Level> actuallyLoadedLevel;
+				std::optional<Gob::Levels::Level> levelToSave;
+
+				switch (requestedLevel) {
+					case Gob::Levels::Level::TWENTYTHREE: {
+						// Don't store "Level 23" in the save file. We want to go back to level 22 instead after a continue.
+						actuallyLoadedLevel = Gob::Levels::Level::TWENTYTHREE;
+
+						break;
+					}
+
+					case Gob::Levels::Level::ONE: {
+						const bool isOnLoadingScreen = _vm->isCurrentTot("inter.tot");
+
+						if (_vm->_game->_gob1_simulateSaveLoad && _vm->_game->_highestReachedLevel != Gob::Levels::Level::UNKNOWN && isOnLoadingScreen) {
+							actuallyLoadedLevel = levelToSave = _vm->_game->_highestReachedLevel;
+
+							// Don't save or unlock anything, just replace the level we're loading with the one we think is the highest we've reached.
+							_vm->_game->_totToLoad = Gob::Levels::Gob1::MAPPED_LEVEL_NAMES[_vm->_game->_highestReachedLevel];
+
+							/*
+							* And don't forget to tell the game to *NOT* simulate a save load next time we load level one.
+							* This is a remnant of code we used to have. I'm honestly not sure if this is still necessary
+							* or not. I just don't know in which case this will apply.
+							*
+							* With all that said, when doing a "AGAIN", we'll shut the game down, destroy the `GobEngine`
+							* instance and recreate one, and `_gob1_simulateSaveLoad` will be set to `true` again.
+							*/
+							_vm->_game->_gob1_simulateSaveLoad = false;
+						} else if (_vm->_game->_highestReachedLevel == Gob::Levels::Level::TWENTYTHREE) {
+							// We're looping back from level 23 to level 1. Go back to the collection's main menu.
+							shouldQuit = true;
+						} else {
+							// We've reached level one for the first time! Save that, and unlock the corresponding achievement.
+							actuallyLoadedLevel = levelToSave = Gob::Levels::Level::ONE;
+						}
+
+						break;
+					}
+
+					case Gob::Levels::UNKNOWN: {
+						// Exit the game if we go back to the intro after level 23.
+						shouldQuit = _vm->_game->_totToLoad.matchString("intro.tot") && _vm->_game->_highestReachedLevel == Gob::Levels::Level::TWENTYTHREE;
+
+						break;
+					}
+
+					default: {
+						// For levels between 2 and 22 (inlusive), unlock the corresponding achievement and save progress.
+						actuallyLoadedLevel = levelToSave = requestedLevel;
+
+						break;
+					}
+				}
+
+				if (actuallyLoadedLevel.has_value()) {
+					g_system->getDataServiceManager()->unlockAchievement(static_cast<uint32>(*actuallyLoadedLevel));
+
+					_vm->_game->_highestReachedLevel = std::max(_vm->_game->_highestReachedLevel, *actuallyLoadedLevel);
+				}
+
+				if (levelToSave.has_value()) {
 					g_system->getSavefileManager()->mountSaveData();
 
-					saveGobFile(_vm->_game->_totToLoad.c_str());
+					saveGobFile(Gob::Levels::Gob1::MAPPED_LEVEL_NAMES[*levelToSave].c_str());
 
 					g_system->getSavefileManager()->umountSaveData();
 				}
-				else {
-					// Should check that the current tot file is superior than the latest played.
-					// If this is the case, then we should update _highestReachedLevel and save the game
-					const Gob::Levels::Level newLevel = Gob::Levels::Gob1::getLevelIdFromLevelName(_vm->_game->_totToLoad);
-					if (newLevel == Gob::Levels::Level::ONE && _vm->_game->_highestReachedLevel == Gob::Levels::Level::TWENTYTHREE) {
-						//in Gob1, the game restart to Level ONE after Level TWENTYTHREE
-						//we need to force the _highestReachedLevel to be re-saved to Level ONE to avoid issues
-						//like being stuck when trying to Reload the Level ONE after a Game Over.
-						_vm->_game->_highestReachedLevel = Gob::Levels::Level::UNKNOWN;
-					}
-					if (newLevel > _vm->_game->_highestReachedLevel) {
-						_vm->_game->_highestReachedLevel = newLevel;
 
-						g_system->getSavefileManager()->mountSaveData();
+				if (shouldQuit) {
+					Common::Event event;
 
-						saveGobFile(_vm->_game->_totToLoad.c_str());
+					event.type = Common::EventType::EVENT_QUIT;
 
-						g_system->getSavefileManager()->umountSaveData();
-					}
+					g_system->getEventManager()->notifyEvent(event);
 				}
-				_vm->_game->startupCheck = false; // Should be 'false' for the rest of the game lifetime
-			}
-			// Skip the introduction and the credits screen for Gob2
-			else if (Gob::GameType::kGameTypeGob2 == _vm->getGameType() && _vm->_game->skipIntro && Common::String("intro0.tot") == _vm->_game->_totToLoad) {
+			} else if (Gob::GameType::kGameTypeGob2 == _vm->getGameType() && _vm->_game->skipIntro && Common::String("intro0.tot") == _vm->_game->_totToLoad) {
+				// Skip the introduction and the credits screen for Gob2
 				_vm->_game->_totToLoad = "menu.tot";
-			}
-			// Skip the credits screen for Gob3
-			else if (Gob::GameType::kGameTypeGob3 == _vm->getGameType() && _vm->_game->skipIntro && Common::String("DEMO.tot") == _vm->_game->_totToLoad) {
+			} else if (Gob::GameType::kGameTypeGob3 == _vm->getGameType() && _vm->_game->skipIntro && Common::String("DEMO.tot") == _vm->_game->_totToLoad) {
+				// Skip the credits screen for Gob3
 				_vm->_game->_totToLoad = "MENU.tot";
 			}
 		}
@@ -2051,8 +2085,6 @@ void Inter_v1::setupOpcodesDraw() {
 			g_system->getSavefileManager()->commitChanges();
 		}
 		else warning("save current progression for Gob1 failed!");
-
-		g_system->getDataServiceManager()->unlockAchievement((uint32)_vm->_game->_highestReachedLevel);
 	}
 
 	void Inter_v1::o1_override_reloadTot(OpFuncParams& params) {

@@ -83,7 +83,7 @@ namespace Gob1 {
 	/// <summary>
 	/// Mapping table to get the tot file of a given level
 	/// </summary>
-	static const std::map<Gob::Levels::Level, Common::String> MAPPED_LEVEL_NAMES = {
+	static std::map<Gob::Levels::Level, Common::String> MAPPED_LEVEL_NAMES = {
 		{ Gob::Levels::Level::ONE,         "avt003.tot"},
 		{ Gob::Levels::Level::TWO,         "avt00.tot"},
 		{ Gob::Levels::Level::THREE,       "avt002.tot"},

@@ -606,37 +606,6 @@ namespace Gob {
 		}
 	}
 
-	Common::Point Goblin::getGoblinPosition(int16 index) const noexcept {
-#if defined(_DEBUG) || defined(PROFILE)
-		assert(index >= 0);
-#endif
-
-		Common::Point point = { -1, -1 };
-
-		bool isGobBusy = ((index == 0) ? _gob1Busy : _gob2Busy);
-
-		if (NULL == _vm->_mult->_objects) return point;
-
-		Mult::Mult_Object* obj = &_vm->_mult->_objects[index];
-		if (NULL == obj || isGobBusy || (obj->newLeft == 0 && obj->newTop == 0)) {
-			warning("Impossible to get the position of goblin at index '%d', returning NULL position...", index);
-		}
-		else {
-			if (2 == index) {
-				point.x = obj->newLeft + ((obj->newRight - obj->newLeft) / 2) + 1; // Middle of the sprite
-				point.y = obj->newTop + ((obj->newBottom - obj->newTop) / 2)  + 1; // Middle of the sprite
-			}
-			else {
-				point.x = obj->newLeft + ((obj->newRight - obj->newLeft) / 2) - 1;     // Middle of the sprite
-				if (obj->newTop < 30) point.y = obj->newBottom - 2;                    // Bottom of the sprite
-				else if (obj->newBottom > 170) point.y = obj->newTop + 1;              // Top of the sprite
-				else point.y = obj->newTop + ((obj->newBottom - obj->newTop) / 2) - 1; // Middle of the sprite
-			}
-		}
-
-		return point;
-	}
-
 	// index - goblin to select+1
 	// index==0 - switch to next
 	void Goblin::switchGoblin(int16 index) {

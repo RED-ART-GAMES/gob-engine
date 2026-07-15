@@ -467,6 +467,7 @@ namespace Gob {
 			_scenery = new Scenery_v2(this);
 			_targetName = "Gobliiins3";
 			_saveLoad = new SaveLoad_v3(this, _targetName.c_str(), SaveLoad_v3::kScreenshotTypeGob3);
+			g_system->getEventManager()->fingerMotionSdlEventListener = [this] (const Common::Pointf& normalizedCoordinates) { _util->onFingerMotionSdlEvent(normalizedCoordinates); };
 			break;
 
 		case kGameTypeWoodruff:
@@ -486,6 +487,8 @@ namespace Gob {
 			deinitGameParts();
 			return Common::kUnsupportedGameidError;
 		}
+
+		_util->setRetraceHook();
 
 		// Setup mixer
 		syncSoundSettings();

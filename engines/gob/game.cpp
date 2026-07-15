@@ -713,7 +713,7 @@ namespace Gob {
 			if (auto saveFile = std::unique_ptr<Common::InSaveFile> { g_system->getSavefileManager()->openSaveForLoading(saveDataFilename) }; saveFile != nullptr) {
 				// SAVE DATA STRUCTURE
 				// 
-				// Line 1: The level (as an integer)
+				// Line 1: The level (TOT name)
 				// Line 2: The border index (as an integer), should be between 0 and the maximum number of borders set in the graphics manager
 				// Line 3: The aspect ratio (as an integer), should be between 0 and UNKNOWN (but should not be UNKNOWN... need a check!!)
 				// 
@@ -734,7 +734,8 @@ namespace Gob {
 					if (_vm->_debug->_levelToLoad == -1)
 #endif
 					{
-						_highestReachedLevel = Gob::Levels::Gob1::getLevelIdFromLevelName(levelIdAsString);
+						// Filter out nonsense.
+						_highestReachedLevel = std::max(Gob::Levels::ONE, Gob::Levels::Gob1::getLevelIdFromLevelName(levelIdAsString));
 					}
 				}
 
@@ -872,13 +873,40 @@ namespace Gob {
 
 		_vm->_assignSpeakerOnHookPosition.reset();
 
-		if ((_vm->getFeatures() & kFeaturesCD) == 0 && _vm->getGameType() == kGameTypeGob2) {
-			const std::optional<uint8_t> level = Inter_v1::tryExtractGob2LevelNumber(
-				_curTotFile.matchString("menu.tot", true)
-				? _vm->_game->_menuLoadedFromTot
-				: _curTotFile);
+		do
+		{
+			const Gob::GameType gameType = _vm->getGameType();
 
-			if (level.has_value()) {
+			const bool isGob2 = gameType == GameType::kGameTypeGob2;
+
+			constexpr std::chrono::milliseconds extendedDebounceInterval = std::chrono::milliseconds { 3 * 17 };
+
+			if (isGob2 || gameType == GameType::kGameTypeGob3)
+			{
+				// Helps avoid missing inputs when the menu is loaded. Using _curTotFile is done on purpose.
+				g_system->getEventManager()->inputUpDebounceInterval = (
+					_curTotFile.matchString("menu.tot", true)
+					? extendedDebounceInterval
+					: Common::EventManager::defaultInputUpDebounceInterval);
+			}
+
+			if (!isGob2) {
+				break;
+			}
+
+
+			const Common::String& level = _curTotFile.matchString("menu.tot", true) ? _vm->_game->_menuLoadedFromTot : _curTotFile;
+
+			const std::optional<uint8_t> levelId = Inter_v1::tryExtractGob2LevelNumber(level);
+
+			// Sometimes, the object at level 2 is not the buffoon, and this breaks character switching.
+			_vm->_util->resizeAnimationTrackingList(levelId >= 14 ? 3 : 2);
+
+			if (levelId == 12 || levelId == 13) {
+				g_system->getEventManager()->inputUpDebounceInterval = extendedDebounceInterval;
+			}
+
+			if (!(_vm->getFeatures() & Gob::Features::kFeaturesCD) && levelId.has_value()) {
 				static int32_t hookPositions[] = {
 					15'757, /* GOB00 */ 16'026, /* GOB01 */ 17'578, /* GOB02 */ 17'457, /* GOB03 */ 19'865, /* GOB04 */
 					18'342, /* GOB05 */ 20'565, /* GOB06 */ 17'997, /* GOB07 */ 18'476, /* GOB08 */ 15'968, /* GOB09 */
@@ -886,9 +914,9 @@ namespace Gob {
 					20'261, /* GOB15 */ 18'567, /* GOB16 */ 19'602, /* GOB17 */ 19'711, /* GOB18 */ 20'104, /* GOB19 */
 					21'541, /* GOB20 */ 16'708, /* GOB21 */ 16'509, /* GOB22 */ };
 
-				_vm->_assignSpeakerOnHookPosition = hookPositions[*level];
+				_vm->_assignSpeakerOnHookPosition = hookPositions[*levelId];
 			}
-		}
+		} while (false);
 
 		if (function <= 0) {
 			while (!_vm->shouldQuit()) {
